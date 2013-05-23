@@ -39,8 +39,6 @@
 
 #include "oserver.h"
 
-#define TAG "oserver"
-
 #define CLI_MAX_WR_IOV  32			/* max iov per writev(2) */
 
 // const char *argp_program_version = PACKAGE_VERSION;
@@ -182,9 +180,10 @@ int main(int argc, char *argv[])
 	 * now we can parse the configuration, errors to applog
 	 */
 	read_config(&par, par.conf_name);
-	if (!oserver.ourhost) {
+	if (!par.host) {
 		oserver.ourhost = get_hostname();
 	} else {
+		oserver.ourhost = par.host;
 		if (debugging)
 			applog(LOG_INFO, "Forcing local hostname to %s",
 			    oserver.ourhost);
@@ -1220,7 +1219,9 @@ static bool cli_evt_http_req(struct client *cli, unsigned int events)
 		rcb = cli_err(cli, InvalidURI); /* wrong method, but meh */
 	}
 
+#if 0
 out:
+#endif
 	// free(bucket);
 	free(path);
 	// free(user);

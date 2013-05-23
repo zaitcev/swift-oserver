@@ -30,6 +30,8 @@
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #endif
 
+#define TAG "oserver"
+
 #define CLI_REQ_BUF_SZ    8192		/* buffer for req + hdrs */
 #define CLI_DATA_BUF_SZ  65536
 
@@ -52,6 +54,7 @@ enum errcode {
 struct param {
 	const char *conf_name;
 	bool use_syslog;
+	char *host;
 	char *port;			/* bind port */
 	char *port_file;
 	char *status_port;		/* status webserver */
