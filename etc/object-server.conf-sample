@@ -1,0 +1,8 @@
+[DEFAULT]
+# bind_ip = 0.0.0.0
+# bind_port = 6000
+#
+# The port_file is used when bind_port=auto, typically for testing.
+# port_file =
+#
+# devices = /srv/node

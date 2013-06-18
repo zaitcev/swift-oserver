@@ -42,7 +42,6 @@
 #define CLI_MAX_WR_IOV  32			/* max iov per writev(2) */
 
 // const char *argp_program_version = PACKAGE_VERSION;
-#define PACKAGE_STRING "moo"
 
 struct server_socket {
 	bool			is_status;
@@ -53,9 +52,12 @@ struct server_socket {
 static const char doc[] = TAG " - drop-in object server daemon";
 
 static const char conf_default[] = "/etc/swift/oserver.conf";
+static const char sconf_default[] = "/etc/swift/swft.conf";
 static struct argp_option options[] = {
 	{ "config", 'C', conf_default, 0,
 	  "Configuration file" },
+	{ "swift-config", 'c', sconf_default, 0,
+	  "Swift configuration file" },
 	{ "debug", 'd', NULL, 0,
 	  "Enable debugging output" },
 	{ "stderr", 'E', NULL, 0,
@@ -95,7 +97,7 @@ static struct {
 
 	[InvalidBucketName] =
 	{ "InvalidBucketName", 400,
-	  "The specified bucket is not valid" },
+	  "The specified bucket is not valid" }, /* XXX remove */
 
 	[InvalidURI] =
 	{ "InvalidURI", 400,
@@ -105,12 +107,12 @@ static struct {
 	{ "MissingContentLength", 411,
 	  "You must provide the Content-Length HTTP header" },
 
-	[NoSuchBucket] =
-	{ "NoSuchBucket", 404,
-	  "The specified bucket does not exist" },
+	[NoSuchFile] =
+	{ "NoSuchFile", 404,
+	  "The specified resource cannot be opened" },
 
-	[NoSuchKey] =
-	{ "NoSuchKey", 404,
+	[NoSuchRes] =
+	{ "NoSuchRes", 404,
 	  "The resource you requested does not exist" },
 
 	[PreconditionFailed] =
@@ -127,7 +129,6 @@ static int net_write_port(const char *port_file,
     const char *host, const char *port);
 static void net_listen_status(void);
 static void net_listen_client(void);
-static bool cli_stub(struct client *cli);
 static bool cli_evt_http_req(struct client *cli, unsigned int events);
 static void tcp_cli_wr_event(int fd, short events, void *userdata);
 static void tcp_cli_event(int fd, short events, void *userdata);
@@ -136,6 +137,7 @@ static char *get_hostname(void);
 
 static struct param par = {
 	.conf_name = conf_default,
+	.sconf_name = sconf_default,
 	.use_syslog = true,
 };
 static bool server_running = true;
@@ -179,7 +181,7 @@ int main(int argc, char *argv[])
 	/*
 	 * now we can parse the configuration, errors to applog
 	 */
-	read_config(&par, par.conf_name);
+	read_config(&par, par.sconf_name, par.conf_name);
 	if (!par.host) {
 		oserver.ourhost = get_hostname();
 	} else {
@@ -244,6 +246,9 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state)
 		// 	argp_usage(state);
 		// }
 		par.conf_name = arg;
+		break;
+	case 'c':
+		par.sconf_name = arg;
 		break;
 	case 'd':
 		debugging = 1;
@@ -676,10 +681,6 @@ static void cli_free(struct client *cli)
 {
 	cli_write_free_all(cli);
 
-	/* XXX ouch */
-	// cli_out_end(cli);
-	// cli_in_end(cli);
-
 	/* clean up network socket */
 	if (cli->fd >= 0) {
 		if (cli->ev_active && event_del(cli->tcp_ev) < 0)
@@ -691,7 +692,13 @@ static void cli_free(struct client *cli)
 		close(cli->fd);
 	}
 
+	/* applog(LOG_INFO, "object-server %s - - [] \"%s %s\" %d %ld \"-\" \"txid\" \"-\" 0.0", cli->addr_host, method, path, status, (unsigned long)length); */
+	applog(LOG_INFO,
+	    "object-server %s - - [] \"%s %s\" %d %ld \"-\" \"txid\" \"-\" 0.0",
+	    cli->addr_host, cli->req.method, cli->res->res_path,
+	    0, (unsigned long)0);
 	hreq_free(&cli->req);
+	res_free(cli->res);
 
 	// if (cli->write_cnt_max > oserver.stats.max_write_buf)
 	// 	oserver.stats.max_write_buf = cli->write_cnt_max;
@@ -717,7 +724,12 @@ static bool cli_evt_recycle(struct client *cli, unsigned int events)
 {
 	unsigned int slop;
 
+	applog(LOG_INFO,
+	    "object-server %s - - [] \"%s %s\" %d %ld \"-\" \"txid\" \"-\" 0.0",
+	    cli->addr_host, cli->req.method, cli->res->res_path,
+	    0, (unsigned long)0);
 	hreq_free(&cli->req);
+	res_free(cli->res);  cli->res = NULL;
 
 	cli->hdr_start = NULL;
 	cli->hdr_end = NULL;
@@ -930,45 +942,10 @@ out:
 	return rc;
 }
 
-static bool cli_stub(struct client *cli) /* XXX */
-{
-	int rc;
-	char timestr[50], *hdr = NULL, *content = NULL;
-
-	applog(LOG_INFO, "client %s stub", cli->addr_host);
-
-	content = strdup("moo-moo");
-	if (!content)
-		return false;
-
-	rc = asprintf(&hdr,
-		"HTTP/%d.%d %d x\r\n"
-		"Content-Type: text/plain\r\n"
-		"Content-Length: %zu\r\n"
-		"Date: %s\r\n"
-		"Connection: close\r\n"
-		"Server: " PACKAGE_STRING "\r\n"
-		"\r\n",
-		     cli->req.major,
-		     cli->req.minor,
-		     200,
-		     strlen(content),
-		     hutil_time2str(timestr, sizeof(timestr), time(NULL)));
-	if (rc < 0) {
-		free(content);
-		return false;
-	}
-
-	return cli_err_write(cli, hdr, content);
-}
-
 bool cli_err(struct client *cli, enum errcode code)
 {
 	int rc;
 	char timestr[50], *hdr = NULL, *content = NULL;
-
-	applog(LOG_INFO, "client %s error %s",
-	       cli->addr_host, err_info[code].code);
 
 	content = g_markup_printf_escaped(
 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n"
@@ -987,7 +964,6 @@ bool cli_err(struct client *cli, enum errcode code)
 		"Content-Length: %zu\r\n"
 		"Date: %s\r\n"
 		"Connection: close\r\n"
-		"Server: " PACKAGE_STRING "\r\n"
 		"\r\n",
 		     cli->req.major,
 		     cli->req.minor,
@@ -1031,7 +1007,6 @@ static bool cli_resp(struct client *cli, int http_status,
 "Content-Length: %zu\r\n"
 "Date: %s\r\n"
 "%s"
-"Server: " PACKAGE_STRING "\r\n"
 "\r\n",
 		     cli->req.major,
 		     cli->req.minor,
@@ -1083,7 +1058,7 @@ bool cli_resp_html(struct client *cli, int http_status, GList *content)
 static bool cli_evt_http_req(struct client *cli, unsigned int events)
 {
 	struct http_req *req = &cli->req;
-	char *host, *auth, *content_len_str;
+	char *host;
 	// char *bucket = NULL;
 	char *path = NULL;
 	// char *user = NULL;
@@ -1092,13 +1067,14 @@ static bool cli_evt_http_req(struct client *cli, unsigned int events)
 	bool rcb;
 	// bool buck_in_path = false;
 	bool expect_cont = false;
+	struct resource *res;
 #if 0
 	enum errcode err;
 #endif
 
 	/* grab useful headers */
 	host = hreq_hdr(req, "host");
-	content_len_str = hreq_hdr(req, "content-length");
+	// content_len_str = hreq_hdr(req, "content-length");
 	// auth = hreq_hdr(req, "authorization");
 	if (req->major > 1 || req->minor > 0) {
 		char *expect = hreq_hdr(req, "expect");
@@ -1109,34 +1085,20 @@ static bool cli_evt_http_req(struct client *cli, unsigned int events)
 	if (!host)
 		return cli_err(cli, InvalidArgument);
 
-#if 0
-	/* attempt to obtain bucket name from Host */
-	bucket = bucket_host(host, tabled_srv.ourhost);
-
-	/* attempt to obtain bucket name from URI path */
-	if (!bucket)
-		buck_in_path = bucket_base(req->uri.path, req->uri.path_len,
-					   &bucket, &path);
-	else
-		path = g_strndup(req->uri.path, req->uri.path_len);
-#endif
+	path = g_strndup(req->uri.path, req->uri.path_len);
 
 	if (!path)
 		path = strdup("/");
-	// key = pathtokey(path);
-
 	if (debugging)
-		applog(LOG_INFO,
-		    "%s: method %s path '%s'", cli->addr_host, method, path);
+		applog(LOG_INFO, "client %s method %s path %s",
+		    cli->addr_host, method, path);
 
-#if 0
-	if (auth) {
-		err = authcheck(&cli->req, buck_in_path? NULL: bucket, auth,
-				&user);
-		if (err)
-			goto err_out;
+	res = res_open(path, &par);
+	if (!res) {
+		rcb = cli_err(cli, NoSuchRes);
+		goto out;
 	}
-#endif
+	cli->res = res;
 
 	/* no matter whether error or not, this is our next state.
 	 * the main question is whether or not we will go immediately
@@ -1158,70 +1120,19 @@ static bool cli_evt_http_req(struct client *cli, unsigned int events)
 #endif
 
 	/*
-	 * operations on objects
+	 * the meat of method upon resources
 	 */
-#if 0
-	else if (bucket && key && !strcmp(method, "HEAD"))
-		rcb = object_get(cli, user, bucket, key, false);
-	else if (bucket && key && !strcmp(method, "GET"))
-		rcb = object_get(cli, user, bucket, key, true);
-	else if (bucket && key && !strcmp(method, "PUT")) {
-		long content_len;
-
-		if (!content_len_str) {
-			err = MissingContentLength;
-			goto err_out;
-		}
-
-		content_len = atol(content_len_str);
-
-		rcb = object_put(cli, user, bucket, key, content_len,
-				 expect_cont);
-	} else if (bucket && key && !strcmp(method, "DELETE")) {
-		rcb = object_del(cli, user, bucket, key);
-	}
-
-	/*
-	 * operations on buckets
-	 */
-	else if (bucket && !key && !strcmp(method, "GET")) {
-		rcb = bucket_list(cli, user, bucket);
-	}
-	else if (bucket && !key && !strcmp(method, "PUT")) {
-		if (!auth) {
-			err = AccessDenied;
-			goto err_out;
-		}
-		rcb = bucket_add(cli, user, bucket);
-	}
-	else if (bucket && !key && !strcmp(method, "DELETE")) {
-		rcb = bucket_del(cli, user, bucket);
-	}
-
-	/*
-	 * service-wide operations
-	 */
-	else if (!bucket && !key && !strcmp(method, "GET")) {
-		if (!auth) {
-			err = AccessDenied;
-			goto err_out;
-		}
-		rcb = service_list(cli, user);
-	}
-#endif
-	if (strcmp(method, "GET") == 0) {
-		/* XXX implement something */
-		rcb = cli_stub(cli);
+	if (strcmp(method, "HEAD") == 0) {
+		rcb = res_http_get(cli->res, cli, false);
+	} else if (strcmp(method, "GET") == 0) {
+		rcb = res_http_get(cli->res, cli, true);
 	} else {
 		if (debugging)
-			applog(LOG_INFO, "method %s unknown",
-			   method);
+			applog(LOG_INFO, "method %s unknown", method);
 		rcb = cli_err(cli, InvalidURI); /* wrong method, but meh */
 	}
 
-#if 0
 out:
-#endif
 	// free(bucket);
 	free(path);
 	// free(user);
@@ -1505,6 +1416,7 @@ static struct client *cli_alloc(bool is_status)
 		applog(LOG_ERR, "out of memory");
 		return NULL;
 	}
+	cli->par = &par;
 	// INIT_LIST_HEAD(&cli->in_ce.evt_list);
 	// INIT_LIST_HEAD(&cli->in_ce.buf_list);
 
@@ -1597,9 +1509,8 @@ static void tcp_srv_event(int fd, short events, void *userdata)
 	getnameinfo((struct sockaddr *) &cli->addr, addrlen,
 		    host, sizeof(host), NULL, 0, NI_NUMERICHOST);
 	host[sizeof(host) - 1] = 0;
-	applog(LOG_INFO, "client %s connected", host);
-	/* XXX Replace the above with Swift-compatible log entry */
-
+	if (debugging)
+		applog(LOG_INFO, "client %s connected", host);
 	strcpy(cli->addr_host, host);
 
 	return;

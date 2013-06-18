@@ -582,21 +582,31 @@ class TestUnit(unittest.TestCase):
 
         srv_path = "./oserver"
         cfg_path = os.path.join(base_dir, "oserver.conf")
+        scfg_path = os.path.join(base_dir, "swift.conf")
         port_path = os.path.join(base_dir, "oserver.port")
 
         node_dir = os.path.join(base_dir, "srv.node")
         os.mkdir(node_dir)
 
+        fp = open(scfg_path, "w")
+        fp.write("[swift-hash]\n")
+        fp.write("swift_hash_path_suffix = %s\n" % HASH_PATH_SUFFIX)
+        fp.close()
+
         fp = open(cfg_path, "w")
         fp.write("[DEFAULT]\n")
         fp.write("bind_port=auto\n")
         fp.write("port_file=%s\n" % port_path)
+        fp.write("devices=%s\n" % node_dir)
         fp.close()
 
         # Replace with os.spawnv(os.P_NOWAIT, srv_path, args) for Windows
         srv_pid = os.fork()
         if srv_pid == 0:
-            os.execv(srv_path, ["oserver", "-C", cfg_path, "-E" ])
+            os.execv(srv_path, ["oserver",
+                                "-c", scfg_path,
+                                "-C", cfg_path,
+                                "-E"])
             print >>sys.stderr, "exec failed"
             os._exit(1)
 
@@ -611,23 +621,28 @@ class TestUnit(unittest.TestCase):
 
     def tearDown(self):
         os.kill(srv_pid, signal.SIGTERM)
-        # shutil.rmtree(base_dir)
+        shutil.rmtree(base_dir)
 
     def test_root(self):
-        status = poke_server(srv_netloc)
-        # XXX Real object-server returns 400 Bad Request on root path
-        self.assertEquals(status, 200)
+        conn = httplib.HTTPConnection(srv_netloc)
+        conn.request('GET', '/', '', {'X-Timestamp': '1'})
+        resp = conn.getresponse()
+        body = resp.read()
+        self.assertEquals(resp.status, 400)
 
     def test_head_one(self):
         obj_path = create_object(base_dir)
+        conn = httplib.HTTPConnection(srv_netloc)
+        conn.request('HEAD', obj_path, '', {})
+        resp = conn.getresponse()
+        # url = resp.getheader('x-storage-url')
+        # P3
+        print resp.getheaders()
+        # XXX force fail by comparing with bogus 205 for now
+        self.assertEquals(resp.status, 205)
 
-def poke_server(netloc):
-    conn = httplib.HTTPConnection(netloc)
-    conn.request('GET', '/', '', {'X-Timestamp': '1'})
-    resp = conn.getresponse()
-    body = resp.read()
-    # url = resp.getheader('x-storage-url')
-    return resp.status
+    # def test_404(self):
+    # do bogus path here
 
 #    device, partition, account, container, obj = \
 #        split_path(unquote(request.path), 5, 5, True)
@@ -642,12 +657,12 @@ def create_object(top_dir):
     data_etag = etag_b.hexdigest()
 
     device = 'd2'
-    partition = '92714'
-    account = 'AUTH_test'
+    part = '92714'
+    acct = 'AUTH_test'
     container = 'testcont'
     obj = 'x.diff'
 
-    disk_file = DiskFile(node_dir, device, partition, account, container, obj)
+    disk_file = DiskFile(node_dir, device, part, acct, container, obj)
     with disk_file.mkstemp() as fd:
         written = os.write(fd, data_str)
         metadata = {
@@ -657,5 +672,8 @@ def create_object(top_dir):
             'Content-Length': str(data_size),
         }
         disk_file.put(fd, data_size, metadata)
+        # P3
+        if disk_file.datadir:
+            print "datadir", disk_file.datadir
 
-    return None
+    return "/%s/%s/%s/%s/%s" % (device, part, acct, container, obj)

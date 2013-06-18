@@ -19,8 +19,9 @@
  *
  */
 
-#include <event2/event.h>
+#include <stdbool.h>
 #include <glib.h>
+#include <event2/event.h>
 #include <openssl/md5.h>
 #include <hstor.h>
 
@@ -45,19 +46,27 @@ enum errcode {
 	InvalidBucketName,
 	InvalidURI,
 	MissingContentLength,
-	NoSuchBucket,
-	NoSuchKey,
+	NoSuchFile,
+	NoSuchRes,
 	PreconditionFailed,
 	SignatureDoesNotMatch,
 };
 
 struct param {
-	const char *conf_name;
+	const char *conf_name, *sconf_name;
 	bool use_syslog;
+	char *hash_suffix, *hash_prefix;
 	char *host;
 	char *port;			/* bind port */
 	char *port_file;
 	char *status_port;		/* status webserver */
+	char *node_dir;			/* "/srv/node" */
+};
+
+struct resource {
+	int res_type;
+	char *res_path;
+	int fd;
 };
 
 struct client;
@@ -92,6 +101,7 @@ struct client_write {
 struct client {
 	enum client_state	state;		/* socket state */
 	cli_evt_func		*evt_table;
+	const struct param	*par;
 
 	struct sockaddr_in6	addr;		/* inet address */
 	char			addr_host[64];	/* ASCII version of inet addr */
@@ -112,6 +122,9 @@ struct client {
 	char			*hdr_start;	/* current hdr start */
 	char			*hdr_end;	/* current hdr end (so far) */
 
+	struct resource		*res;
+	unsigned long		in_len;
+
 	// struct list_head	out_ch;		/* open_chunk.link */
 	char			*out_bucket;
 	char			*out_key;
@@ -123,12 +136,6 @@ struct client {
 	char			*out_buf;
 	size_t			out_bcnt;	/* used length of out_buf */
 	int			out_nput;	/* number of users of out_buf */
-
-	// struct open_chunk	in_ce;
-	unsigned char		*in_mem;
-	// uint64_t		in_objid;
-	long			in_len;
-	int			in_retry;
 
 	/* we put the big arrays and objects at the end... */
 
@@ -217,10 +224,15 @@ extern void tdb_conn_scrub_cb(void);
 extern struct db_remote *tdb_find_remote_byname(const char *name);
 extern struct db_remote *tdb_find_remote_byid(int id);
 
+/* resource.c */
+struct resource *res_open(const char *path, const struct param *par);
+void res_free(struct resource *res);
+bool res_http_get(struct resource *res, struct client *cli, bool want_body);
+
 /* status.c */
 extern bool stat_evt_http_req(struct client *cli, unsigned int events);
 
 /* config.c */
-extern void read_config(struct param *p, const char *conf);
+extern void read_config(struct param *p, const char *sconf, const char *conf);
 
 #endif /* __OSERVER_H__ */

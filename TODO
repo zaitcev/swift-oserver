@@ -1,1 +1,3 @@
 - run under Valgrind
+- fix or kill status port (maybe relocate into /status or such)
+- a basic man page
