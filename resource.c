@@ -1,9 +1,10 @@
 /*
- * ??? XXX
+ * A resource, which for an object server in Swift only means one type.
  */
 #define _GNU_SOURCE
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -22,7 +23,8 @@ static bool object_get_more(struct client *cli, void *cb_data, bool done);
 /* static void object_get_event(struct open_chunk *ochunk); */
 static bool object_get_poke(struct client *cli);
 static ssize_t stor_get_buf(struct resource *res, void *buf, size_t len);
-static char *make_open_path(const char *url_path, const struct param *par,
+static char *make_open_path(const char *datadir, enum errcode *errp);
+static char *make_dir_path(const char *url_path, const struct param *par,
     enum errcode *errp);
 
 struct str_sp {
@@ -32,26 +34,34 @@ struct str_sp {
 static int str_split(struct str_sp *wvec, int wlen, const char *url_path,
     char sep);
 
-/* XXX return errno so we throw a 500 for ENOMEM instead of 404. */
-struct resource *res_open(const char *path, const struct param *par)
+/* XXX return errno so we throw a 500 for ENOMEM instead of 404. REALLY NOW */
+struct resource *res_open(const char *path, const struct param *par,
+    enum errcode *errp)
 {
 	struct resource *res;
 
 	res = malloc(sizeof(struct resource));
-	if (!res)
+	if (!res) {
+		*errp = InternalError;
 		goto err_alloc;
+	}
 	memset(res, 0, sizeof(struct resource));
 	res->fd = -1;
 
-	/*
-	 * For now, all resources are Swift objects. So, res_type==0.
-	 */
 	res->res_path = strdup(path);
-	if (!res)
+	if (!res) {
+		*errp = InternalError;
 		goto err_path;
+	}
+
+	res->datadir = make_dir_path(res->res_path, par, errp);
+	if (!res->datadir)
+		goto err_datadir;
 
 	return res;
 
+err_datadir:
+	free(res->res_path);
 err_path:
 	free(res);
 err_alloc:
@@ -64,6 +74,7 @@ void res_free(struct resource *res)
 		return;
 	if (res->fd != -1)
 		close(res->fd);
+	free(res->datadir);
 	free(res->res_path);
 	free(res);
 }
@@ -99,23 +110,18 @@ bool res_http_get(struct resource *res, struct client *cli, bool want_body)
 	int rc;
 	ssize_t bytes;
 
-	/* XXX Maybe move opening into res_open, once it can return codes? */
-	open_path = make_open_path(res->res_path, cli->par, &err);
+	/* XXX Maybe move opening into res_open, like in class DiskFile? */
+	open_path = make_open_path(res->datadir, &err);
 	if (!open_path)
 		goto err_open_path;
-
 	/* if (debugging) */
 		applog(LOG_INFO, "open_path %s", open_path);
-
-#if 0 /* XXX implement this */
-	if (deny_dotdot(open_path) != 0) {
-		goto err_dotdot;
-	}
-#endif
 	if ((res->fd = open(open_path, O_RDONLY)) == -1) {
 		err = NoSuchFile;
 		goto err_open;
 	}
+	// XXX if self.meta_file:
+	// XXX if self.metadata['name'] != self.name:
 
 	if (fstat(res->fd, &statb) != 0)
 		goto err_stat;
@@ -208,7 +214,6 @@ err_out_in_end:
 	/* No close(res->fd), it happens when freeing res. */
 err_stat:
 err_open:
-err_dotdot:
 	free(open_path);
 err_open_path:
 	return cli_err(cli, err);
@@ -312,7 +317,72 @@ static ssize_t stor_get_buf(struct resource *res, void *buf, size_t len)
 	return bytes;
 }
 
-static char *make_open_path(const char *url_path, const struct param *par,
+/*
+ * XXX Process .ts
+ * XXX Support .meta
+ */
+static char *make_open_path(const char *datadir, enum errcode *errp)
+{
+	GSList *head = NULL;
+	DIR *dir;
+	struct dirent *ent;
+	GSList *ptr;
+	char *s;
+	size_t l;
+	char *data_fname;
+	char *retpath;
+
+	dir = opendir(datadir);
+	while ((ent = readdir(dir)) != NULL) {
+		s = strdup(ent->d_name);
+		if (!s) {
+			closedir(dir);
+			*errp = InternalError;
+			goto err_dup;
+		}
+		head = g_slist_prepend(head, s);
+	}
+	closedir(dir);
+	head = g_slist_sort(head, (GCompareFunc) &strcmp);
+	head = g_slist_reverse(head);
+
+	data_fname = NULL;
+	for (ptr = head; ptr != NULL; ptr = ptr->next) {
+		s = ptr->data;
+		l = strlen(s);
+		if (l < sizeof(".data"))
+			continue;
+		if (strcmp(s + l - (sizeof(".data")-1), ".data") == 0) {
+			data_fname = s;
+			break;
+		}
+	}
+	if (!data_fname) {
+		*errp = InternalError;
+		goto err_nodata;
+	}
+	if (asprintf(&retpath, "%s/%s", datadir, data_fname) < 0) {
+		*errp = InternalError;
+		goto err_noret;
+	}
+
+#if 0 /* XXX implement this, must be before readdir(). */
+	if (deny_dotdot(retpath) != 0) {
+		goto err_dotdot;
+	}
+err_dotdot:
+#endif
+	g_slist_free_full(head, &free);
+	return retpath;
+
+err_noret:
+err_nodata:
+err_dup:
+	g_slist_free_full(head, &free);
+	return NULL;
+}
+
+static char *make_dir_path(const char *url_path, const struct param *par,
     enum errcode *errp)
 {
 	MD5_CTX md5ctx;
@@ -355,8 +425,6 @@ static char *make_open_path(const char *url_path, const struct param *par,
 		return NULL;
 	}
 	return retpath;
-
-	/* XXX lsdir here */
 }
 
 static int str_split(struct str_sp *wvec, int wmax, const char *url_path,

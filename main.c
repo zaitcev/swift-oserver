@@ -1068,9 +1068,7 @@ static bool cli_evt_http_req(struct client *cli, unsigned int events)
 	// bool buck_in_path = false;
 	bool expect_cont = false;
 	struct resource *res;
-#if 0
 	enum errcode err;
-#endif
 
 	/* grab useful headers */
 	host = hreq_hdr(req, "host");
@@ -1093,9 +1091,9 @@ static bool cli_evt_http_req(struct client *cli, unsigned int events)
 		applog(LOG_INFO, "client %s method %s path %s",
 		    cli->addr_host, method, path);
 
-	res = res_open(path, &par);
+	res = res_open(path, &par, &err);
 	if (!res) {
-		rcb = cli_err(cli, NoSuchRes);
+		rcb = cli_err(cli, err);
 		goto out;
 	}
 	cli->res = res;

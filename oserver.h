@@ -66,6 +66,7 @@ struct param {
 struct resource {
 	int res_type;
 	char *res_path;
+	char *datadir;
 	int fd;
 };
 
@@ -225,7 +226,8 @@ extern struct db_remote *tdb_find_remote_byname(const char *name);
 extern struct db_remote *tdb_find_remote_byid(int id);
 
 /* resource.c */
-struct resource *res_open(const char *path, const struct param *par);
+struct resource *res_open(const char *path, const struct param *par,
+    enum errcode *errp);
 void res_free(struct resource *res);
 bool res_http_get(struct resource *res, struct client *cli, bool want_body);
 
